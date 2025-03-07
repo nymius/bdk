@@ -8,23 +8,39 @@
 // 8. Sync
 // 9. Check funds are there
 
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::thread::sleep;
-use std::time::Duration;
 use std::{error::Error, str::FromStr};
 
-// Import necessary libraries and modules
+use std::{
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant},
+};
+
+use bdk_bitcoind_rpc::{
+    bitcoincore_rpc::{Auth, Client, RpcApi},
+    Emitter,
+};
+
 use bip39::Mnemonic;
 use bitcoin::bip32::{DerivationPath, Xpriv};
-use corepc_client::client_sync::v28::Client;
-use corepc_client::client_sync::Auth;
+use bitcoin::script::{Script, ScriptBuf};
 use rand::fill;
-use secp256k1::silentpayments::silentpayments_sender_create_outputs;
+use secp256k1::silentpayments::{
+    silentpayments_recipient_scan_outputs, silentpayments_sender_create_outputs,
+    SilentpaymentsPublicData,
+};
 use secp256k1::Keypair;
 use secp256k1::SecretKey;
 
 // Import types from the silentpayments library
 use rust_bip352::utils::code::{SilentPaymentCode, SilentPaymentHrp, VersionStrict};
+use rust_bip352::utils::input::get_pubkey_from_input;
 use rust_bip352::utils::outpoint::SilentPaymentOutpoint;
 
 use serde_json::json;
@@ -63,15 +79,36 @@ use example_cli::anyhow::bail;
 use example_cli::anyhow::Context;
 use rand::prelude::*;
 
-use bdk_electrum::{
-    electrum_client::{self, ElectrumApi},
-    BdkElectrumClient,
-};
-
 pub use anyhow;
 
 const DB_MAGIC: &[u8] = b"bdk_example_silent_payment";
 const DB_PATH: &str = ".bdk_example_silent_payment.db";
+/// The mpsc channel bound for emissions from [`Emitter`].
+const CHANNEL_BOUND: usize = 10;
+/// Delay for printing status to stdout.
+const STDOUT_PRINT_DELAY: Duration = Duration::from_secs(6);
+/// Delay between mempool emissions.
+const MEMPOOL_EMIT_DELAY: Duration = Duration::from_secs(30);
+/// Delay for committing to persistence.
+const DB_COMMIT_DELAY: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Clone)]
+struct ScanTxHelperV2 {
+    ins: Vec<(Vec<u8>, TxIn)>,
+    outs: Vec<TxOut>,
+}
+
+impl fmt::Display for ScanTxHelperV2 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for input in self.ins.iter().map(|x| x.1.clone()) {
+            writeln!(f, "input: {:?}\n", input)?;
+        }
+        for output in self.outs.iter() {
+            writeln!(f, "output: {:?}\n", output)?;
+        }
+        write!(f, "")
+    }
+}
 
 #[derive(
     Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, serde::Deserialize, serde::Serialize,
@@ -136,7 +173,7 @@ impl Merge for ChangeSet {
     }
 }
 
-fn parse_keys() -> (SilentPaymentCode, SecretKey) {
+fn parse_silent_payment_keys() -> (SilentPaymentCode, SecretKey) {
     let silent_payment_string: &str = "sprt1qqw7zfpjcuwvq4zd3d4aealxq3d669s3kcde4wgr3zl5ugxs40twv2qccgvszutt7p796yg4h926kdnty66wxrfew26gu2gk5h5hcg4s2jqyascfz";
     let silent_payment_code =
         SilentPaymentCode::<VersionStrict, _>::try_from(silent_payment_string)
@@ -155,35 +192,115 @@ fn parse_keys() -> (SilentPaymentCode, SecretKey) {
     )
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let network = bitcoin::Network::Regtest;
-    let client = Client::new_with_auth(
-        "http://127.0.0.1:18443",
-        Auth::CookieFile("/tmp/.cookie".into()),
-    )?;
+fn scan_tx(
+    receiver: &SilentPaymentCode,
+    secret_scan_key: &SecretKey,
+    scan_tx_helper: ScanTxHelperV2,
+) {
+    let secp = secp256k1::Secp256k1::new();
+    let (taproot_inputs, non_taproot_inputs): (
+        Vec<(ScriptBuf, bitcoin::PublicKey)>,
+        Vec<(ScriptBuf, bitcoin::PublicKey)>,
+    ) = scan_tx_helper
+        .ins
+        .clone()
+        .into_iter()
+        .filter_map(|(prevout, txin)| {
+            let prevout: ScriptBuf = Script::from_bytes(&prevout).into();
+            get_pubkey_from_input(txin, prevout.clone())
+                .unwrap()
+                .map(|pubkey| (prevout, pubkey))
+        })
+        .partition(|(prevout, _)| prevout.is_p2tr());
 
-    let secp = Secp256k1::new();
-    let mut seed = [0x00; 32];
-    fill(&mut seed);
+    let smallest_outpoint: SilentPaymentOutpoint = scan_tx_helper
+        .ins
+        .into_iter()
+        .map(|(_, x)| SilentPaymentOutpoint(x.previous_output))
+        .min()
+        .expect("minimum should exist");
 
-    let m = bip32::Xpriv::new_master(network, &seed)?;
-    let fp = m.fingerprint(&secp);
-    let path = if m.network.is_mainnet() {
-        "86h/0h/0h"
+    let taproot_inputs: Vec<secp256k1::XOnlyPublicKey> = taproot_inputs
+        .iter()
+        .map(|(_, pubkey)| {
+            let secp256k1_pubkey =
+                secp256k1::PublicKey::from_str(pubkey.to_string().as_ref()).unwrap();
+            secp256k1::XOnlyPublicKey::from(secp256k1_pubkey)
+        })
+        .collect();
+
+    let taproot_inputs_v2: Vec<&secp256k1::XOnlyPublicKey> = taproot_inputs.iter().collect();
+    let non_taproot_inputs: Vec<secp256k1::PublicKey> = non_taproot_inputs
+        .iter()
+        .map(|x| secp256k1::PublicKey::from_slice(x.1.to_string().as_ref()).expect("should work"))
+        .collect();
+    let non_taproot_inputs_v2: Vec<&secp256k1::PublicKey> = non_taproot_inputs.iter().collect();
+
+    let taproot_inputs_v2 = if taproot_inputs_v2.is_empty() {
+        None
     } else {
-        "86h/1h/0h"
+        Some(&taproot_inputs_v2[..])
     };
 
-    let descriptors: Vec<String> = [0, 1]
+    let non_taproot_inputs_v2 = if non_taproot_inputs_v2.is_empty() {
+        None
+    } else {
+        Some(&non_taproot_inputs_v2[..])
+    };
+
+    let silent_payment_public_data = SilentpaymentsPublicData::create(
+        &secp,
+        &smallest_outpoint.as_byte_array(),
+        taproot_inputs_v2,
+        non_taproot_inputs_v2,
+    )
+    .unwrap();
+
+    let xonly_outputs: Vec<secp256k1::XOnlyPublicKey> = scan_tx_helper
+        .outs
         .iter()
-        .map(|i| format!("tr([{fp}]{m}/{path}/{i}/*)"))
+        .filter_map(|txout| {
+            if let Ok(res) =
+                secp256k1::XOnlyPublicKey::from_slice(&txout.script_pubkey.as_bytes()[2..])
+            {
+                Some(res)
+            } else {
+                None
+            }
+        })
         .collect();
-    let external_desc = &descriptors[0];
-    let internal_desc = &descriptors[1];
+
+    let xonly_outputs_v2: Vec<&secp256k1::XOnlyPublicKey> = xonly_outputs.iter().collect();
+
+    let silent_payments_found_outputs = silentpayments_recipient_scan_outputs(
+        &secp,
+        &xonly_outputs_v2,
+        &secp256k1::SecretKey::from_slice(secret_scan_key.as_ref()).unwrap(),
+        &silent_payment_public_data,
+        &receiver.0.spend_pubkey,
+        dummy_lookup_function,
+        Option::<BTreeMap<PublicKey, [u8; 32]>>::None,
+    )
+    .unwrap();
+    //let pubkeys_ref: Vec<&PublicKey> = input_pub_keys.iter().collect();
+    for sp_found_output in silent_payments_found_outputs {
+        println!("\nres: {:?}\n", sp_found_output);
+    }
+}
+
+const NON_SP_EXTERNAL_DESCRIPTOR: &str = "tr([3794bb41]tprv8ZgxMBicQKsPdnaCtnmcGNFdbPsYasZC8UJpLchusVmFodRNuKB66PhkiPWrfDhyREzj4vXtT9VfCP8mFFgy1MRo5bL4W8Z9SF241Sx4kmq/86'/1'/0'/0/*)#dg6yxkuh";
+const NON_SP_INTERNAL_DESCRIPTOR: &str = "tr([3794bb41]tprv8ZgxMBicQKsPdnaCtnmcGNFdbPsYasZC8UJpLchusVmFodRNuKB66PhkiPWrfDhyREzj4vXtT9VfCP8mFFgy1MRo5bL4W8Z9SF241Sx4kmq/86'/1'/0'/1/*)#uul9mrv0";
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let network = bitcoin::Network::Regtest;
+    let url = "http://127.0.0.1:18443";
+    let rpc_client = Client::new(url, Auth::CookieFile("/tmp/.cookie".into()))?;
+
+    let secp = Secp256k1::new();
     let (descriptor, keymap) =
-        <Descriptor<DescriptorPublicKey>>::parse_descriptor(&secp, external_desc)?;
+        <Descriptor<DescriptorPublicKey>>::parse_descriptor(&secp, NON_SP_EXTERNAL_DESCRIPTOR)?;
     let (internal_descriptor, internal_keymap) =
-        <Descriptor<DescriptorPublicKey>>::parse_descriptor(&secp, internal_desc)?;
+        <Descriptor<DescriptorPublicKey>>::parse_descriptor(&secp, NON_SP_INTERNAL_DESCRIPTOR)?;
 
     let mut obj = serde_json::Map::new();
     obj.insert("public_external_descriptor".to_string(), json!(descriptor));
@@ -258,97 +375,95 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("[address @ {}] {}", spk_i, addr);
 
-    let hashes = client.generate_to_address(101, &addr)?;
+    let hashes = rpc_client.generate_to_address(101, &addr)?;
 
-    sleep(Duration::new(10, 0));
+    //sleep(Duration::new(10, 0));
 
     //for hash in hashes.0 {
-        //println!("{hash}");
+    //println!("{hash}");
     //}
 
-    let config = electrum_client::Config::builder()
-        .validate_domain(matches!(network, Network::Bitcoin))
-        .build();
+    let chain_tip = chain.lock().unwrap().tip();
+    let start_height = 0;
+    let start = Instant::now();
+    let mut emitter = Emitter::new(&rpc_client, chain_tip, start_height);
+    let mut db_stage = ChangeSet::default();
 
-    let electrum_client = electrum_client::Client::from_config("tcp://127.0.0.1:60401", config)?;
-    let bdk_electrum_client = BdkElectrumClient::new(electrum_client);
+    let mut last_db_commit = Instant::now();
+    let mut last_print = Instant::now();
 
-    // Tell the electrum client about the txs we've already got locally so it doesn't re-download them
-    bdk_electrum_client.populate_tx_cache(
-        graph
-            .lock()
-            .unwrap()
-            .graph()
-            .full_txs()
-            .map(|tx_node| tx_node.tx),
-    );
+    while let Some(emission) = emitter.next_block()? {
+        let height = emission.block_height();
 
-    let request = {
-        let graph = &*graph.lock().unwrap();
-        let chain = &*chain.lock().unwrap();
-
-        FullScanRequest::builder()
-            .chain_tip(chain.tip())
-            .spks_for_keychain(
-                Keychain::External,
-                graph
-                    .index
-                    .unbounded_spk_iter(Keychain::External)
-                    .into_iter()
-                    .flatten(),
-            )
-            .spks_for_keychain(
-                Keychain::Internal,
-                graph
-                    .index
-                    .unbounded_spk_iter(Keychain::Internal)
-                    .into_iter()
-                    .flatten(),
-            )
-            .inspect({
-                let mut once = BTreeSet::new();
-                move |k, spk_i, _| {
-                    if once.insert(k) {
-                        eprint!("\nScanning {}: {} ", k, spk_i);
-                    } else {
-                        eprint!("{} ", spk_i);
-                    }
-                    io::stdout().flush().expect("must flush");
-                }
-            })
-    };
-
-    let res = bdk_electrum_client
-        .full_scan::<_>(request, 1, 1, false)
-        .context("scanning the blockchain")?;
-
-    let db_changeset = {
         let mut chain = chain.lock().unwrap();
         let mut graph = graph.lock().unwrap();
 
-        let chain_changeset =
-            chain.apply_update(res.chain_update.expect("request has chain tip"))?;
-
-        let mut indexed_tx_graph_changeset =
-            indexed_tx_graph::ChangeSet::<ConfirmationBlockTime, _>::default();
-        let keychain_changeset = graph.index.reveal_to_target_multi(&res.last_active_indices);
-        indexed_tx_graph_changeset.merge(keychain_changeset.into());
-        indexed_tx_graph_changeset.merge(graph.apply_update(res.tx_update));
-
-        ChangeSet {
+        let chain_changeset = chain
+            .apply_update(emission.checkpoint)
+            .expect("must always apply as we receive blocks in order from emitter");
+        let graph_changeset = graph.apply_block_relevant(&emission.block, height);
+        db_stage.merge(ChangeSet {
             local_chain: chain_changeset,
-            tx_graph: indexed_tx_graph_changeset.tx_graph,
-            indexer: indexed_tx_graph_changeset.indexer,
+            tx_graph: graph_changeset.tx_graph,
+            indexer: graph_changeset.indexer,
             ..Default::default()
-        }
-    };
+        });
 
-    db.append_changeset(&db_changeset)?;
+        // commit staged db changes in intervals
+        if last_db_commit.elapsed() >= DB_COMMIT_DELAY {
+            last_db_commit = Instant::now();
+            if let Some(changeset) = db_stage.take() {
+                db.append_changeset(&changeset)?;
+            }
+            println!(
+                "[{:>10}s] committed to db (took {}s)",
+                start.elapsed().as_secs_f32(),
+                last_db_commit.elapsed().as_secs_f32()
+            );
+        }
+
+        // print synced-to height and current balance in intervals
+        if last_print.elapsed() >= STDOUT_PRINT_DELAY {
+            last_print = Instant::now();
+            let synced_to = chain.tip();
+            let balance = {
+                graph.graph().balance(
+                    &*chain,
+                    synced_to.block_id(),
+                    graph.index.outpoints().iter().cloned(),
+                    |(k, _), _| k == &Keychain::Internal,
+                )
+            };
+            println!(
+                "[{:>10}s] synced to {} @ {} | total: {}",
+                start.elapsed().as_secs_f32(),
+                synced_to.hash(),
+                synced_to.height(),
+                balance.total()
+            );
+        }
+    }
+
+    let mempool_txs = emitter.mempool()?;
+    let graph_changeset = graph
+        .lock()
+        .unwrap()
+        .batch_insert_relevant_unconfirmed(mempool_txs);
+    {
+        db_stage.merge(ChangeSet {
+            tx_graph: graph_changeset.tx_graph,
+            indexer: graph_changeset.indexer,
+            ..Default::default()
+        });
+        if let Some(changeset) = db_stage.take() {
+            db.append_changeset(&changeset)?;
+        }
+    }
 
     {
         let mut graph = graph.lock().unwrap();
         //for tx in graph.graph().full_txs().map(|tx_node| tx_node.tx) {
-            //println!("{tx:?}");
+        //println!("{tx:?}");
         //}
     }
 
@@ -399,7 +514,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let chain_tip = chain.get_chain_tip().unwrap();
         let outpoints = graph.index.outpoints().iter().cloned();
         // for tx in graph.graph().full_txs().map(|tx_node| tx_node.tx) {
-            // println!("{tx:?}");
+        // println!("{tx:?}");
         // }
 
         graph
@@ -448,7 +563,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         dbg!(fulltxo.txout.value);
         let sender_outpoint = SilentPaymentOutpoint(fulltxo.outpoint);
-        let (silent_payment_code, _) = parse_keys();
+        let (silent_payment_code, _) = parse_silent_payment_keys();
         let tweaked_sp_pubkey = silentpayments_sender_create_outputs(
             &secp_sp,
             &mut [&silent_payment_code.create_recipient(0)],
@@ -516,11 +631,74 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let tx = psbt.extract_tx()?;
 
-        let send_raw_transaction = client.send_raw_transaction(&tx).unwrap();
-        let txid = send_raw_transaction.txid().unwrap();
+        let txid = rpc_client.send_raw_transaction(&tx).unwrap();
 
         println!("txid: {}", txid);
+        let hashes = rpc_client.generate_to_address(1, &addr)?;
     }
 
+    {
+        let (silent_payment_code, silent_payments_secret_key) = parse_silent_payment_keys();
+        let chain = Mutex::new({
+            let (mut chain, _) =
+                LocalChain::from_genesis_hash(constants::genesis_block(network).block_hash());
+            chain.apply_changeset(&changeset.local_chain)?;
+            chain
+        });
+        let chain_tip = chain.lock().unwrap().tip();
+        let start_height = 0;
+        let mut emitter = Emitter::new(&rpc_client, chain_tip, start_height);
+
+        while let Some(emission) = emitter.next_block()? {
+            let block = emission.block.clone();
+            // Iterate transactions ingoring coinbase transaction
+            for tx in block.txdata.iter().skip(1) {
+                let scan_tx_helper = ScanTxHelperV2 {
+                    ins: tx
+                        .input
+                        .iter()
+                        .map(|txin| {
+                            let bitcoin::OutPoint { ref txid, vout } = txin.previous_output;
+                            (
+                                rpc_client.get_raw_transaction(txid, None).unwrap().output
+                                    [vout as usize]
+                                    .clone()
+                                    .script_pubkey
+                                    .into_bytes(),
+                                txin.clone(),
+                            )
+                        })
+                        .collect(),
+                    outs: tx
+                        .output
+                        .clone()
+                        .into_iter()
+                        .filter(|output| output.script_pubkey.is_p2tr())
+                        .collect(),
+                };
+                scan_tx(
+                    &silent_payment_code,
+                    &silent_payments_secret_key,
+                    scan_tx_helper.clone(),
+                );
+                println!("helper: {:?}", scan_tx_helper);
+            }
+        }
+    }
     Ok(())
+}
+
+pub type c_int = i32;
+pub type c_uchar = u8;
+pub type c_uint = u32;
+pub type size_t = usize;
+
+/// This might not match C's `c_char` exactly.
+/// The way we use it makes it fine either way but this type shouldn't be used outside of the library.
+pub type c_char = i8;
+
+pub use core::ffi::c_void;
+unsafe extern "C" fn dummy_lookup_function(_: *const c_uchar, _: *const c_void) -> *const c_uchar {
+    let x = 5_u8;
+    &x as *const c_uchar
 }

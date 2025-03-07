@@ -8,7 +8,7 @@ authors.workspace = true
 bitcoin = "0.32.5"
 rand = "0.9.0"
 bdk_chain = { path = "../../crates/chain", features = ["serde", "miniscript"]}
-secp256k1 = { git = "https://github.com/nymius/rust-secp256k1", branch = "bip352-silentpayments-module-REBASED", version = "0.30.0" }
+secp256k1 = { path = "../../../silentpayments/rust-secp256k1-pr-721-add-sp-module" }
 rust-bip352 = { path = "../../../silentpayments/rust-bip352" }
 bdk_bitcoind_rpc = { path = "../../crates/bitcoind_rpc" }
 example_cli = { path = "../example_cli" }
@@ -19,6 +19,7 @@ bip39 = "2.1.0"
 bdk_coin_select = "0.3.0"
 bdk_file_store = { path = "../../crates/file_store" }
 bdk_electrum = { path = "../../crates/electrum" }
+bdk_testenv = { path = "../../crates/testenv", default-features = false }
 
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
