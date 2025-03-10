@@ -531,7 +531,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .collect::<Vec<_>>()
     };
 
-    {
+    let (sp_blockhash, sp_txid, sp_txin, sp_txin_prevout_script_pubkey) = {
         let chain = &*chain.lock().unwrap();
         let mut graph = graph.lock().unwrap();
 
@@ -598,16 +598,17 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let plan = txo_desc.plan(&assets).ok().unwrap();
 
-        let unsigned_tx = Transaction {
-            version: transaction::Version::TWO,
-            lock_time: absolute::LockTime::from_height(chain.get_chain_tip()?.height)?,
-            input: vec![TxIn {
+        let silent_payment_txin = TxIn {
                 previous_output: fulltxo.outpoint,
                 sequence: plan
                     .relative_timelock
                     .map_or(Sequence::ENABLE_RBF_NO_LOCKTIME, Sequence::from),
                 ..Default::default()
-            }],
+            };
+        let unsigned_tx = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::from_height(chain.get_chain_tip()?.height)?,
+            input: vec![silent_payment_txin.clone()],
             output: vec![TxOut {
                 value: fulltxo.txout.value - Amount::from_sat(1000),
                 script_pubkey: sp_final_address.into(),
@@ -634,57 +635,65 @@ fn main() -> Result<(), Box<dyn Error>> {
         let txid = rpc_client.send_raw_transaction(&tx).unwrap();
 
         println!("txid: {}", txid);
-        let hashes = rpc_client.generate_to_address(1, &addr)?;
-    }
+        let block_hashes = rpc_client.generate_to_address(1, &addr)?;
+        assert_eq!(block_hashes.len(), 1);
+        (block_hashes[0], txid, silent_payment_txin, fulltxo.txout.script_pubkey)
+    };
 
     {
         let (silent_payment_code, silent_payments_secret_key) = parse_silent_payment_keys();
-        let chain = Mutex::new({
-            let (mut chain, _) =
-                LocalChain::from_genesis_hash(constants::genesis_block(network).block_hash());
-            chain.apply_changeset(&changeset.local_chain)?;
-            chain
-        });
-        let chain_tip = chain.lock().unwrap().tip();
-        let start_height = 0;
-        let mut emitter = Emitter::new(&rpc_client, chain_tip, start_height);
+        let silentpayment_block = rpc_client.get_block(&sp_blockhash);
 
-        while let Some(emission) = emitter.next_block()? {
-            let block = emission.block.clone();
-            // Iterate transactions ingoring coinbase transaction
-            for tx in block.txdata.iter().skip(1) {
-                let scan_tx_helper = ScanTxHelperV2 {
-                    ins: tx
-                        .input
-                        .iter()
-                        .map(|txin| {
-                            let bitcoin::OutPoint { ref txid, vout } = txin.previous_output;
-                            (
-                                rpc_client.get_raw_transaction(txid, None).unwrap().output
-                                    [vout as usize]
-                                    .clone()
-                                    .script_pubkey
-                                    .into_bytes(),
-                                txin.clone(),
-                            )
-                        })
-                        .collect(),
-                    outs: tx
-                        .output
-                        .clone()
-                        .into_iter()
-                        .filter(|output| output.script_pubkey.is_p2tr())
-                        .collect(),
-                };
-                scan_tx(
-                    &silent_payment_code,
-                    &silent_payments_secret_key,
-                    scan_tx_helper.clone(),
-                );
-                println!("helper: {:?}", scan_tx_helper);
-            }
-        }
     }
+
+    //  {
+    //      let (silent_payment_code, silent_payments_secret_key) = parse_silent_payment_keys();
+    //      let chain = Mutex::new({
+    //          let (mut chain, _) =
+    //              LocalChain::from_genesis_hash(constants::genesis_block(network).block_hash());
+    //          chain.apply_changeset(&changeset.local_chain)?;
+    //          chain
+    //      });
+    //      let chain_tip = chain.lock().unwrap().tip();
+    //      let start_height = 0;
+    //      let mut emitter = Emitter::new(&rpc_client, chain_tip, start_height);
+
+    //      while let Some(emission) = emitter.next_block()? {
+    //          let block = emission.block.clone();
+    //          // Iterate transactions ingoring coinbase transaction
+    //          for tx in block.txdata.iter().skip(1) {
+    //              let scan_tx_helper = ScanTxHelperV2 {
+    //                  ins: tx
+    //                      .input
+    //                      .iter()
+    //                      .map(|txin| {
+    //                          let bitcoin::OutPoint { ref txid, vout } = txin.previous_output;
+    //                          (
+    //                              rpc_client.get_raw_transaction(txid, None).unwrap().output
+    //                                  [vout as usize]
+    //                                  .clone()
+    //                                  .script_pubkey
+    //                                  .into_bytes(),
+    //                              txin.clone(),
+    //                          )
+    //                      })
+    //                      .collect(),
+    //                  outs: tx
+    //                      .output
+    //                      .clone()
+    //                      .into_iter()
+    //                      .filter(|output| output.script_pubkey.is_p2tr())
+    //                      .collect(),
+    //              };
+    //              scan_tx(
+    //                  &silent_payment_code,
+    //                  &silent_payments_secret_key,
+    //                  scan_tx_helper.clone(),
+    //              );
+    //              println!("helper: {:?}", scan_tx_helper);
+    //          }
+    //      }
+    //  }
     Ok(())
 }
 
