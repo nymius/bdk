@@ -16,7 +16,7 @@ members = [
     "example-crates/example_wallet_electrum",
     "example-crates/example_wallet_esplora_blocking",
     "example-crates/example_wallet_esplora_async",
-    "example-crates/example_wallet_rpc",
+    "example-crates/example_wallet_rpc", "example-crates/example_rust_silentpayments",
 ]
 
 [workspace.package]
