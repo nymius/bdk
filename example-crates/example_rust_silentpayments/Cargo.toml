@@ -9,11 +9,10 @@ bdk_bitcoind_rpc = { version = "0.18.0", path = "../../crates/bitcoind_rpc" }
 bdk_chain = { version = "0.21.1", path = "../../crates/chain", features = ["miniscript", "serde"] }
 bdk_file_store = { version = "0.18.1", path = "../../crates/file_store" }
 bdk_testenv = { version = "0.11.1", path = "../../crates/testenv" }
-bitcoin = "0.31.1"
 rand = "0.9.0"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
-silentpayments = { version = "0.4.0", path = "../../../../rust-silentpayments" }
+# silentpayments = { version = "0.4.0", path = "../../../rust-silentpayments" }
 
 [lints]
 workspace = true
