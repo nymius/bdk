@@ -5,8 +5,9 @@ edition = "2021"
 authors.workspace = true
 
 [dependencies]
-bdk_chain = { version = "0.21.1", path = "../../crates/chain", features = ["miniscript", "serde"] }
+bdk_silentpayments = { version = "0.1.0", path = "../../crates/silentpayments" }
 bdk_testenv = { version = "0.11.1", path = "../../crates/testenv" }
+miniscript = { version = "12.0.0", default-features = true }
 
 [lints]
 workspace = true
