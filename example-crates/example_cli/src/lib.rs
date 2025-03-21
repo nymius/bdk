@@ -471,7 +471,10 @@ pub fn handle_commands<CS: clap::Subcommand, S: clap::Args>(
                         ..Default::default()
                     })?;
                     let addr = Address::from_script(spk.as_script(), network)?;
-                    println!("[address @ {}] {}", spk_i, addr);
+                    let mut obj = serde_json::Map::new();
+                    obj.insert("address".to_string(), json!(addr));
+                    obj.insert("index".to_string(), json!(spk_i));
+                    println!("{}", serde_json::to_string_pretty(&obj)?);
                     Ok(())
                 }
                 AddressCmd::Index => {
@@ -899,15 +902,24 @@ fn generate_bip86_helper(network: impl Into<NetworkKind>) -> anyhow::Result<()> 
         <Descriptor<DescriptorPublicKey>>::parse_descriptor(&secp, external_desc)?;
     let (internal_descriptor, internal_keymap) =
         <Descriptor<DescriptorPublicKey>>::parse_descriptor(&secp, internal_desc)?;
-    println!("Public");
-    println!("{}", descriptor);
-    println!("{}", internal_descriptor);
-    println!("\nPrivate");
-    println!("{}", descriptor.to_string_with_secret(&keymap));
-    println!(
-        "{}",
-        internal_descriptor.to_string_with_secret(&internal_keymap)
+    let mut obj = serde_json::Map::new();
+    obj.insert(
+        "public_external_descriptor".to_string(),
+        json!(descriptor.to_string()),
     );
+    obj.insert(
+        "private_external_descriptor".to_string(),
+        json!(descriptor.to_string_with_secret(&keymap)),
+    );
+    obj.insert(
+        "public_internal_descriptor".to_string(),
+        json!(internal_descriptor.to_string()),
+    );
+    obj.insert(
+        "private_internal_descriptor".to_string(),
+        json!(internal_descriptor.to_string_with_secret(&internal_keymap)),
+    );
+    println!("{}", serde_json::to_string_pretty(&obj)?);
 
     Ok(())
 }
