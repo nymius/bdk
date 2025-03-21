@@ -5,7 +5,7 @@ edition = "2021"
 authors.workspace = true
 
 [dependencies]
-bitcoin = { version = "0.32.0", default-features = false }
+bitcoin = { version = "0.32.0", default-features = true }
 
 [dev-dependencies]
 anyhow = "1"
