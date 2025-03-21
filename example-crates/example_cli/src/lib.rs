@@ -1,3 +1,4 @@
+use bitcoin::ScriptBuf;
 use serde_json::json;
 use std::cmp;
 use std::collections::HashMap;
@@ -258,9 +259,9 @@ pub fn create_tx<O: ChainOracle>(
     chain: &O,
     assets: &Assets,
     cs_algorithm: CoinSelectionAlgo,
-    address: Address,
+    script_pubkey: ScriptBuf,
     value: u64,
-) -> anyhow::Result<(Psbt, Option<ChangeInfo>)>
+) -> anyhow::Result<(Transaction, Vec<PlanUtxo>, Option<ChangeInfo>)>
 where
     O::Error: std::error::Error + Send + Sync + 'static,
 {
@@ -297,7 +298,7 @@ where
     // create recipient output(s)
     let mut outputs = vec![TxOut {
         value: Amount::from_sat(value),
-        script_pubkey: address.script_pubkey(),
+        script_pubkey,
     }];
 
     let (change_keychain, _) = graph
@@ -362,7 +363,7 @@ where
     }
 
     // get the selected plan utxos
-    let selected: Vec<_> = selector.apply_selection(&plan_utxos).collect();
+    let selected: Vec<PlanUtxo> = selector.apply_selection(&plan_utxos).cloned().collect();
 
     // if the selection tells us to use change and the change value is sufficient, we add it as an output
     let mut change_info = Option::<ChangeInfo>::None;
@@ -398,15 +399,7 @@ where
         output: outputs,
     };
 
-    // update psbt with plan
-    let mut psbt = Psbt::from_unsigned_tx(unsigned_tx)?;
-    for (i, (plan, utxo)) in selected.iter().enumerate() {
-        let psbt_input = &mut psbt.inputs[i];
-        plan.update_psbt_input(psbt_input);
-        psbt_input.witness_utxo = Some(utxo.txout.clone());
-    }
-
-    Ok((psbt, change_info))
+    Ok((unsigned_tx, selected, change_info))
 }
 
 // Alias the elements of `planned_utxos`
@@ -594,7 +587,7 @@ pub fn handle_commands<CS: clap::Subcommand, S: clap::Args>(
             } => {
                 let address = address.require_network(network)?;
 
-                let (psbt, change_info) = {
+                let (unsigned_tx, selected_utxos, change_info) = {
                     let mut graph = graph.lock().unwrap();
                     let chain = chain.lock().unwrap();
 
@@ -618,8 +611,16 @@ pub fn handle_commands<CS: clap::Subcommand, S: clap::Args>(
                         }
                     }
 
-                    create_tx(&mut graph, &*chain, &assets, coin_select, address, value)?
+                    create_tx(&mut graph, &*chain, &assets, coin_select, address.script_pubkey(), value)?
                 };
+
+                // update psbt with plan
+                let mut psbt = Psbt::from_unsigned_tx(unsigned_tx)?;
+                for (i, (plan, utxo)) in selected_utxos.iter().enumerate() {
+                    let psbt_input = &mut psbt.inputs[i];
+                    plan.update_psbt_input(psbt_input);
+                    psbt_input.witness_utxo = Some(utxo.txout.clone());
+                }
 
                 if let Some(ChangeInfo {
                     change_keychain,
