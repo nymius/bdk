@@ -6,8 +6,11 @@ authors.workspace = true
 
 [dependencies]
 bdk_silentpayments = { version = "0.1.0", path = "../../crates/silentpayments" }
-bdk_testenv = { version = "0.11.1", path = "../../crates/testenv" }
+bdk_chain = { version =  "0.21.1", features = ["serde", "miniscript"]}
 miniscript = { version = "12.0.0", default-features = true }
+example_cli = { path = "../example_cli" }
+serde_json = "1.0"
+clap = { version = "4.5.17", features = ["derive", "env"] }
 
 [lints]
 workspace = true
