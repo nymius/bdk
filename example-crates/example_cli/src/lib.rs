@@ -615,7 +615,14 @@ pub fn handle_commands<CS: clap::Subcommand, S: clap::Args>(
                         }
                     }
 
-                    create_tx(&mut graph, &*chain, &assets, coin_select, address.script_pubkey(), value)?
+                    create_tx(
+                        &mut graph,
+                        &*chain,
+                        &assets,
+                        coin_select,
+                        address.script_pubkey(),
+                        value,
+                    )?
                 };
 
                 // update psbt with plan
