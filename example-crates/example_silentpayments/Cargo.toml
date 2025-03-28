@@ -7,10 +7,12 @@ authors.workspace = true
 [dependencies]
 bdk_silentpayments = { version = "0.1.0", path = "../../crates/silentpayments" }
 bdk_chain = { version =  "0.21.1", features = ["serde", "miniscript"]}
+bdk_bitcoind_rpc = { version =  "0.18.0" }
 miniscript = { version = "12.0.0", default-features = true }
-example_cli = { path = "../example_cli" }
+anyhow = "1"
 serde_json = "1.0"
 clap = { version = "4.5.17", features = ["derive", "env"] }
+bitcoin = { version = "0.32.0", features = ["base64"], default-features = false }
 
 [lints]
 workspace = true
