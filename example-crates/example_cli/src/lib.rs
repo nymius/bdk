@@ -727,7 +727,9 @@ pub fn handle_commands<CS: clap::Subcommand, S: clap::Args>(
 
                     match broadcast(chain_specific, &tx) {
                         Ok(_) => {
-                            println!("Broadcasted Tx: {}", tx.compute_txid());
+                            let mut obj = serde_json::Map::new();
+                            obj.insert("broadcasted_tx".to_string(), json!(tx.compute_txid()));
+                            println!("{}", serde_json::to_string_pretty(&obj)?);
 
                             let changeset = graph.insert_tx(tx);
 
