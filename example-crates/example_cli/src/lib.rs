@@ -416,18 +416,22 @@ pub fn planned_utxos<O: ChainOracle>(
         .graph()
         .try_filter_chain_unspents(chain, chain_tip, outpoints.iter().cloned())?
         .filter_map(|((k, i), full_txo)| -> Option<Result<PlanUtxo, _>> {
-            let desc = graph
-                .index
-                .keychains()
-                .find(|(keychain, _)| *keychain == k)
-                .expect("keychain must exist")
-                .1
-                .at_derivation_index(i)
-                .expect("i can't be hardened");
+            if full_txo.is_mature(chain_tip.height) {
+                let desc = graph
+                    .index
+                    .keychains()
+                    .find(|(keychain, _)| *keychain == k)
+                    .expect("keychain must exist")
+                    .1
+                    .at_derivation_index(i)
+                    .expect("i can't be hardened");
 
-            let plan = desc.plan(assets).ok()?;
+                let plan = desc.plan(assets).ok()?;
 
-            Some(Ok((plan, full_txo)))
+                Some(Ok((plan, full_txo)))
+            } else {
+                None
+            }
         })
         .collect()
 }
