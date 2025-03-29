@@ -71,7 +71,7 @@ pub enum Commands<CS: clap::Subcommand, S: clap::Args> {
     /// Initialize a new data store.
     Init {
         /// Network
-        #[clap(long, short, default_value = "signet")]
+        #[clap(long, short, default_value = "signet", env = "NETWORK")]
         network: Network,
         /// Descriptor
         #[clap(env = "DESCRIPTOR")]
