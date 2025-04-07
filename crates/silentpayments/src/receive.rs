@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use bitcoin::{
     self,
     hashes::{Hash, HashEngine},
-    key::{Parity, Secp256k1},
+    key::{Parity, Secp256k1, TweakedPublicKey},
     secp256k1::{self, ecdh::shared_secret_point, PublicKey, Scalar, SecretKey},
     Amount, CompressedPublicKey, OutPoint, PubkeyHash, ScriptBuf, Transaction, TxIn, TxOut, Txid,
     XOnlyPublicKey,
@@ -149,6 +149,16 @@ pub struct SpOut {
     pub xonly_pubkey: XOnlyPublicKey,
     pub amount: Amount,
     pub label: Option<u32>,
+}
+
+impl From<&SpOut> for TxOut {
+    fn from(spout: &SpOut) -> Self {
+        let tweaked_pubkey = TweakedPublicKey::dangerous_assume_tweaked(spout.xonly_pubkey);
+        TxOut {
+            value: spout.amount,
+            script_pubkey: ScriptBuf::new_p2tr_tweaked(tweaked_pubkey),
+        }
+    }
 }
 
 impl Scanner {
