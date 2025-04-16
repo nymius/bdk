@@ -6,6 +6,7 @@ authors.workspace = true
 
 [dependencies]
 bitcoin = { version = "0.32.0", default-features = true }
+serde = { version = "1", optional = true, features = ["derive", "rc"] }
 
 [dev-dependencies]
 anyhow = "1"
@@ -15,3 +16,6 @@ miniscript = { version = "12.0.0", default-features = true }
 
 [lints]
 workspace = true
+
+[features]
+serde = ["dep:serde", "bitcoin/serde"]
