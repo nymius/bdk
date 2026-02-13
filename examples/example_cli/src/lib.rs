@@ -23,7 +23,7 @@ use bdk_chain::ConfirmationBlockTime;
 use bdk_chain::{
     indexer::keychain_txout::{self, KeychainTxOutIndex},
     local_chain::{self, LocalChain},
-    tx_graph, ChainOracle, DescriptorExt, FullTxOut, IndexedTxGraph, Merge,
+    tx_graph, ChainOracle, ChainPosition, DescriptorExt, FullTxOut, IndexedTxGraph, Merge,
 };
 use bdk_coin_select::{
     metrics::LowestFee, Candidate, ChangePolicy, CoinSelector, DrainWeights, FeeRate, Target,
@@ -278,9 +278,9 @@ pub fn create_tx(
             plan_utxos.sort_by_key(|(_, utxo)| cmp::Reverse(utxo.txout.value))
         }
         CoinSelectionAlgo::SmallestFirst => plan_utxos.sort_by_key(|(_, utxo)| utxo.txout.value),
-        CoinSelectionAlgo::OldestFirst => plan_utxos.sort_by_key(|(_, utxo)| utxo.chain_position),
+        CoinSelectionAlgo::OldestFirst => plan_utxos.sort_by_key(|(_, utxo)| utxo.pos),
         CoinSelectionAlgo::NewestFirst => {
-            plan_utxos.sort_by_key(|(_, utxo)| cmp::Reverse(utxo.chain_position))
+            plan_utxos.sort_by_key(|(_, utxo)| cmp::Reverse(utxo.pos))
         }
         CoinSelectionAlgo::BranchAndBound => plan_utxos.shuffle(&mut thread_rng()),
     }
@@ -417,7 +417,7 @@ pub fn create_tx(
 }
 
 // Alias the elements of `planned_utxos`
-pub type PlanUtxo = (Plan, FullTxOut<ConfirmationBlockTime>);
+pub type PlanUtxo = (Plan, FullTxOut<ChainPosition<ConfirmationBlockTime>>);
 
 pub fn planned_utxos(
     graph: &KeychainTxGraph,
@@ -570,8 +570,8 @@ pub fn handle_commands<CS: clap::Subcommand, S: clap::Args>(
                             _ => true,
                         })
                         .filter(|(_, full_txo)| match (confirmed, unconfirmed) {
-                            (true, false) => full_txo.chain_position.is_confirmed(),
-                            (false, true) => !full_txo.chain_position.is_confirmed(),
+                            (true, false) => full_txo.pos.is_confirmed(),
+                            (false, true) => !full_txo.pos.is_confirmed(),
                             _ => true,
                         })
                         .collect::<Vec<_>>();
