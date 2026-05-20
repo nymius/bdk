@@ -40,7 +40,6 @@ fn is_topological(order: &[Txid], edges: &[(Txid, Txid)]) -> bool {
 /// order) which the current implementation does not satisfy. Once `mark_canonical` (or `finish()`)
 /// is fixed to produce a valid topological order, remove the `#[ignore]`.
 #[test]
-#[ignore = "canonical order is not yet topological; see canonical_task.rs mark_canonical / finish"]
 fn canonical_order_is_topological() {
     // Diamond-shaped DAG - no conflicts (B and C spend different outputs of A):
     //
@@ -153,7 +152,6 @@ fn canonical_order_is_topological() {
 /// `#[ignore]`'d for the same reason as `canonical_order_is_topological`: asserts the desired
 /// invariant; removing the `#[ignore]` is the acceptance criterion for the fix.
 #[test]
-#[ignore = "canonical order is not yet topological; see canonical_task.rs mark_canonical / finish"]
 fn canonical_order_is_topological_on_chain_with_assumed_ancestor_and_seen_descendant() {
     // Linear chain - no conflicts:
     //
@@ -239,7 +237,6 @@ fn canonical_order_is_topological_on_chain_with_assumed_ancestor_and_seen_descen
 /// `#[ignore]`'d for the same reason as the other order tests: asserts the desired invariant;
 /// removing the `#[ignore]` is the acceptance criterion for the fix.
 #[test]
-#[ignore = "canonical order is not yet topological; see canonical_task.rs mark_canonical / finish"]
 fn canonical_order_is_topological_with_two_inputs_from_same_parent_avoids_in_degree_inflation() {
     // A has two outputs; B spends both - two inputs, one canonical parent.
     let local_chain = local_chain![(0, hash!("genesis"))];

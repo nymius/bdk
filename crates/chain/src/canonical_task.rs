@@ -68,9 +68,6 @@ pub struct CanonicalTask<'g, A> {
     canonical: CanonicalMap<A>,
     not_canonical: NotCanonicalSet,
 
-    // Store canonical transactions in order
-    canonical_order: Vec<Txid>,
-
     // Track the current stage of processing
     current_stage: CanonicalStage,
 }
@@ -194,24 +191,79 @@ impl<'g, A: Anchor> ChainQuery for CanonicalTask<'g, A> {
     }
 
     fn finish(self) -> Self::Output {
-        let mut view_order = Vec::new();
-        let mut view_txs = HashMap::new();
+        // Build parent-before-child order over the canonical set
+        // using Kahn's algorithm. Parent edges come from each tx's inputs restricted to
+        // txids that are themselves canonical.
+
+        // Compute in-degree (number of canonical parents) and children adjacency for each
+        // canonical tx. BTreeSet keeps children in ascending txid order so that the final
+        // output order is deterministic.
+        let mut in_degree: HashMap<Txid, usize> = HashMap::with_capacity(self.canonical.len());
+        let mut children: HashMap<Txid, BTreeSet<Txid>> = HashMap::new();
+        for (&txid, (tx, _)) in &self.canonical {
+            // Collect unique canonical parent txids (a tx may have multiple inputs from the
+            // same parent; count each parent once to avoid inflating in-degree).
+            let canonical_parents: BTreeSet<Txid> = tx
+                .input
+                .iter()
+                .map(|input| input.previous_output.txid)
+                .filter(|parent| self.canonical.contains_key(parent))
+                .collect();
+            for parent in &canonical_parents {
+                children.entry(*parent).or_default().insert(txid);
+            }
+            in_degree.insert(txid, canonical_parents.len());
+        }
+
+        // Collect roots (in-degree 0) into a Vec used as a stack. Insert in descending
+        // txid order so that pop() yields the lexicographically smallest txid first.
+        let mut stack: Vec<Txid> = in_degree
+            .iter()
+            .filter(|(_, &degree)| degree == 0)
+            .map(|(&txid, _)| txid)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+
+        let mut view_order = Vec::with_capacity(self.canonical.len());
+        let mut view_txs = HashMap::with_capacity(self.canonical.len());
         let mut view_spends = HashMap::new();
 
-        for txid in &self.canonical_order {
-            if let Some((tx, reason)) = self.canonical.get(txid) {
-                view_order.push(*txid);
+        while let Some(txid) = stack.pop() {
+            let (tx, reason) = self
+                .canonical
+                .get(&txid)
+                .expect("txid in stack must be in canonical map")
+                .clone();
 
-                // Add spends
-                if !tx.is_coinbase() {
-                    for input in &tx.input {
-                        view_spends.insert(input.previous_output, *txid);
+            view_order.push(txid);
+            if !tx.is_coinbase() {
+                for input in &tx.input {
+                    view_spends.insert(input.previous_output, txid);
+                }
+            }
+            view_txs.insert(txid, (tx, reason));
+
+            if let Some(cs) = children.remove(&txid) {
+                // Iterate descending so the smallest child is pushed last and popped next.
+                for child in cs.into_iter().rev() {
+                    let degree = in_degree
+                        .get_mut(&child)
+                        .expect("child of canonical tx must be in in_degree map");
+                    *degree -= 1;
+                    if *degree == 0 {
+                        stack.push(child);
                     }
                 }
-
-                view_txs.insert(*txid, (tx.clone(), reason.clone()));
             }
         }
+
+        debug_assert_eq!(
+            view_order.len(),
+            self.canonical.len(),
+            "Kahn's algorithm must visit all nodes; a cycle in the canonical set is impossible"
+        );
 
         CanonicalTxs::new(self.chain_tip, view_order, view_txs, view_spends)
     }
@@ -250,7 +302,6 @@ impl<'g, A: Anchor> CanonicalTask<'g, A> {
             canonical: HashMap::new(),
             not_canonical: HashSet::new(),
 
-            canonical_order: Vec::new(),
             current_stage: CanonicalStage::default(),
         }
     }
@@ -267,7 +318,7 @@ impl<'g, A: Anchor> CanonicalTask<'g, A> {
         // `tx` double spends itself.
         let mut detected_self_double_spend = false;
         let mut undo_not_canonical = Vec::<Txid>::new();
-        let mut staged_canonical = Vec::<(Txid, Arc<Transaction>, CanonicalReason<A>)>::new();
+        let mut staged_canonical = Vec::<Txid>::new();
 
         // Process ancestors
         TxAncestors::new_include_root(
@@ -314,7 +365,7 @@ impl<'g, A: Anchor> CanonicalTask<'g, A> {
                     return None;
                 }
 
-                staged_canonical.push((this_txid, tx.clone(), this_reason.clone()));
+                staged_canonical.push(this_txid);
                 canonical_entry.insert((tx.clone(), this_reason));
                 Some(this_txid)
             },
@@ -323,18 +374,12 @@ impl<'g, A: Anchor> CanonicalTask<'g, A> {
 
         if detected_self_double_spend {
             // Undo changes
-            for (txid, _, _) in staged_canonical {
+            for txid in staged_canonical {
                 self.canonical.remove(&txid);
             }
             for txid in undo_not_canonical {
                 self.not_canonical.remove(&txid);
             }
-            return;
-        }
-
-        // Add to canonical order
-        for (txid, _, _) in &staged_canonical {
-            self.canonical_order.push(*txid);
         }
     }
 }
