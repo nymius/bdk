@@ -220,3 +220,77 @@ fn canonical_order_is_topological_on_chain_with_assumed_ancestor_and_seen_descen
         txid("Z"),
     );
 }
+
+/// Demonstrates the topological-order invariant on a graph where a child transaction has two
+/// inputs both spending from the same parent.
+///
+/// Graph:
+///
+///   A   (root, two outputs)
+///   |\
+///   | \
+///   B   (assume_canonical; inputs = [A:0, A:1])
+///
+/// Any topological-walk implementation must deduplicate parent txids when counting in-degree:
+/// a child with N inputs from the same parent contributes a *single* DAG edge, not N. Counting
+/// inputs directly inflates in-degree, leaving the child unreachable in algorithms like Kahn's
+/// (the parent decrements once but the child needs N decrements to reach in-degree 0).
+///
+/// `#[ignore]`'d for the same reason as the other order tests: asserts the desired invariant;
+/// removing the `#[ignore]` is the acceptance criterion for the fix.
+#[test]
+#[ignore = "canonical order is not yet topological; see canonical_task.rs mark_canonical / finish"]
+fn canonical_order_is_topological_with_two_inputs_from_same_parent_avoids_in_degree_inflation() {
+    // A has two outputs; B spends both - two inputs, one canonical parent.
+    let local_chain = local_chain![(0, hash!("genesis"))];
+    let chain_tip = local_chain.tip().block_id();
+
+    let tx_templates = [
+        TxTemplate {
+            tx_name: "A",
+            inputs: &[TxInTemplate::Bogus],
+            outputs: &[
+                TxOutTemplate::new(10_000, None),
+                TxOutTemplate::new(10_000, None),
+            ],
+            anchors: &[],
+            last_seen: None,
+            assume_canonical: false,
+        },
+        TxTemplate {
+            tx_name: "B",
+            inputs: &[TxInTemplate::PrevTx("A", 0), TxInTemplate::PrevTx("A", 1)],
+            outputs: &[TxOutTemplate::new(18_000, None)],
+            anchors: &[],
+            last_seen: None,
+            assume_canonical: true,
+        },
+    ];
+
+    let env = init_graph::<BlockId>(&tx_templates);
+    let txid = |name: &str| *env.txid_to_name.get(name).unwrap();
+
+    let canonical_view =
+        local_chain.canonical_view(&env.tx_graph, chain_tip, env.canonicalization_params);
+
+    let canonical_order: Vec<Txid> = canonical_view.txs().map(|t| t.txid).collect();
+
+    assert_eq!(
+        canonical_order.len(),
+        2,
+        "expected both txs canonical, got: {:?}",
+        canonical_order
+    );
+
+    let expected_edges = [(txid("A"), txid("B"))];
+
+    assert!(
+        is_topological(&canonical_order, &expected_edges),
+        "canonical order is not topological (parents before children).\n\
+         order: {:?}\n\
+         A={}, B={}",
+        canonical_order,
+        txid("A"),
+        txid("B"),
+    );
+}
