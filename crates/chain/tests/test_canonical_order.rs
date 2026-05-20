@@ -124,3 +124,99 @@ fn canonical_order_is_topological() {
         txid("D"),
     );
 }
+
+/// Demonstrates the same topological-order bug on a linear chain X -> Y -> Z.
+///
+/// The chain shape is specifically chosen because it is a failure mode of any inline ordering
+/// scheme that assigns indices in visit order and bumps an existing entry's index on revisit -
+/// the current code does not implement such a scheme, but this test pins down the required
+/// invariant regardless of how the fix is approached.
+///
+/// Trace through the current code:
+///
+/// `params.assume_canonical = [X, Y]` is iterated in reverse (line 228 of canonical_task.rs),
+/// so the AssumedTxs stage processes Y first:
+///
+/// 1. `mark_canonical(Y, Assumed)` - BFS from Y visits Y (depth 0), then walks up to X (depth 1,
+///    Y's only parent). Both are inserted. `canonical_order = [Y, X]`.
+///
+/// 2. The AssumedTxs iterator next yields X, but `is_canonicalized(X)` is now true, so
+///    `mark_canonical` is skipped entirely. X's position at index 1 is locked.
+///
+/// 3. SeenTxs stage runs `mark_canonical(Z, ObservedIn(Mempool(1)))`. BFS from Z visits Z (inserted
+///    at index 2), then walks up to Y. Y is `Entry::Occupied` - the closure returns None, pruning
+///    the walk. `canonical_order = [Y, X, Z]`.
+///
+/// The resulting order `[Y, X, Z]` is neither topological (X must precede Y) nor
+/// reverse-topological (Z must precede Y).
+///
+/// `#[ignore]`'d for the same reason as `canonical_order_is_topological`: asserts the desired
+/// invariant; removing the `#[ignore]` is the acceptance criterion for the fix.
+#[test]
+#[ignore = "canonical order is not yet topological; see canonical_task.rs mark_canonical / finish"]
+fn canonical_order_is_topological_on_chain_with_assumed_ancestor_and_seen_descendant() {
+    // Linear chain - no conflicts:
+    //
+    //   X   (assume_canonical)
+    //   |
+    //   Y   (assume_canonical)
+    //   |
+    //   Z   (last_seen = 1)
+    let local_chain = local_chain![(0, hash!("genesis"))];
+    let chain_tip = local_chain.tip().block_id();
+
+    let tx_templates = [
+        TxTemplate {
+            tx_name: "X",
+            inputs: &[TxInTemplate::Bogus],
+            outputs: &[TxOutTemplate::new(10_000, None)],
+            anchors: &[],
+            last_seen: None,
+            assume_canonical: true,
+        },
+        TxTemplate {
+            tx_name: "Y",
+            inputs: &[TxInTemplate::PrevTx("X", 0)],
+            outputs: &[TxOutTemplate::new(9_000, None)],
+            anchors: &[],
+            last_seen: None,
+            assume_canonical: true,
+        },
+        TxTemplate {
+            tx_name: "Z",
+            inputs: &[TxInTemplate::PrevTx("Y", 0)],
+            outputs: &[TxOutTemplate::new(8_000, None)],
+            anchors: &[],
+            last_seen: Some(1),
+            assume_canonical: false,
+        },
+    ];
+
+    let env = init_graph::<BlockId>(&tx_templates);
+    let txid = |name: &str| *env.txid_to_name.get(name).unwrap();
+
+    let canonical_view =
+        local_chain.canonical_view(&env.tx_graph, chain_tip, env.canonicalization_params);
+
+    let canonical_order: Vec<Txid> = canonical_view.txs().map(|t| t.txid).collect();
+
+    assert_eq!(
+        canonical_order.len(),
+        3,
+        "expected all 3 txs canonical, got: {:?}",
+        canonical_order
+    );
+
+    let expected_edges = [(txid("X"), txid("Y")), (txid("Y"), txid("Z"))];
+
+    assert!(
+        is_topological(&canonical_order, &expected_edges),
+        "canonical order is not topological (parents before children).\n\
+         order: {:?}\n\
+         X={}, Y={}, Z={}",
+        canonical_order,
+        txid("X"),
+        txid("Y"),
+        txid("Z"),
+    );
+}
