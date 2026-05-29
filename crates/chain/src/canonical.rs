@@ -439,7 +439,6 @@ impl<A: Anchor> CanonicalView<A> {
         &'v self,
         outpoints: impl IntoIterator<Item = (O, OutPoint)> + 'v,
         mut trust_predicate: impl FnMut(&O, &CanonicalTxOut<ChainPosition<A>>) -> bool,
-        min_confirmations: u32,
     ) -> Balance {
         let mut immature = Amount::ZERO;
         let mut trusted_pending = Amount::ZERO;
@@ -448,23 +447,8 @@ impl<A: Anchor> CanonicalView<A> {
 
         for (spk_i, txout) in self.filter_unspent_outpoints(outpoints) {
             match &txout.pos {
-                ChainPosition::Confirmed { anchor, .. } => {
-                    let confirmation_height = anchor.confirmation_height_upper_bound();
-                    let confirmations = self
-                        .tip
-                        .height
-                        .saturating_sub(confirmation_height)
-                        .saturating_add(1);
-                    let min_confirmations = min_confirmations.max(1); // 0 and 1 behave identically
-
-                    if confirmations < min_confirmations {
-                        // Not enough confirmations, treat as trusted/untrusted pending
-                        if trust_predicate(&spk_i, &txout) {
-                            trusted_pending += txout.txout.value;
-                        } else {
-                            untrusted_pending += txout.txout.value;
-                        }
-                    } else if txout.is_confirmed_and_spendable(self.tip.height) {
+                ChainPosition::Confirmed { .. } => {
+                    if txout.is_confirmed_and_spendable(self.tip.height) {
                         confirmed += txout.txout.value;
                     } else if !txout.is_mature(self.tip.height) {
                         immature += txout.txout.value;

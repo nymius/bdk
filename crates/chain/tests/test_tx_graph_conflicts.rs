@@ -1034,7 +1034,6 @@ fn test_tx_conflict_handling() {
                     .index_of_spk(txout.txout.script_pubkey.as_script())
                     .is_some()
             },
-            0,
         );
         assert_eq!(
             balance, scenario.exp_balance,
