@@ -23,6 +23,7 @@ miniscript = { version = "13.0.0", optional = true, default-features = false }
 
 # Feature dependencies
 rusqlite = { version = "0.31.0", features = ["bundled"], optional = true }
+bitcoin-silent-payments = { git = "https://git.rust-bitcoin.org/nymius/bitcoin-silent-payments", version = "0.1.0", features = ["serde", "compat_v32"] }
 
 [dev-dependencies]
 rand = "0.8"
