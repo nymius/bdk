@@ -882,3 +882,165 @@ fn test_get_chain_position() {
     .into_iter()
     .for_each(|t| run(&chain, &mut graph, t));
 }
+
+/// Tests for Silent Payments indexing functionality
+#[cfg(test)]
+mod sp_indexing_tests {
+    use super::*;
+
+    use bdk_chain::sp_indexer::sp_keychain_index::SpKeychainIndex;
+    use bdk_chain::sp_indexer::SpTxIndex;
+    use bdk_chain::{Indexer, Merge};
+    use bitcoin::hashes::Hash as _;
+    use bitcoin::secp256k1::{Keypair, PublicKey, SecretKey};
+    use bitcoin_silent_payments::compat_v32::create_prevouts_summary_32;
+    use bitcoin_silent_payments::receive::SpRx;
+    use bitcoin_silent_payments::secp256k1::silentpayments::recipient::PrevoutsSummary;
+    use bitcoin_silent_payments::send::SpGroup;
+    use bitcoin_silent_payments::LexMin;
+
+    /// Sender-side transaction together with the [`PrevoutsSummary`] and receiver
+    /// key material needed to scan it, built so the sender derivation and the
+    /// receiver summary are consistent.
+    struct SpFixture {
+        tx: Transaction,
+        summary: PrevoutsSummary,
+        scan_sk: SecretKey,
+        spend_pk: PublicKey,
+    }
+
+    impl SpFixture {
+        fn new() -> Self {
+            let secp = Secp256k1::new();
+            let mut rng = rand::thread_rng();
+
+            let scan_sk = SecretKey::new(&mut rng);
+            let scan_pk = scan_sk.public_key(&secp);
+            let spend_sk = SecretKey::new(&mut rng);
+            let spend_pk = spend_sk.public_key(&secp);
+
+            let input_sk = SecretKey::new(&mut rng);
+            let input_kp = Keypair::from_secret_key(&secp, &input_sk);
+            let (input_xonly, _parity) = input_kp.x_only_public_key();
+
+            let outpoint = OutPoint {
+                txid: Txid::from_byte_array([0x42; 32]),
+                vout: 0,
+            };
+            let mut lex_min = LexMin::default();
+            lex_min.update_v32(&outpoint);
+            let lex_min_bytes = lex_min.bytes().expect("updated at least once");
+
+            let mut group = SpGroup::new();
+            group
+                .add_v32(scan_pk, spend_pk)
+                .expect("group accepts one code");
+            let derivations = group
+                .create_outputs_v32(&lex_min_bytes, &[input_kp], &[])
+                .expect("create outputs");
+            let derived_xonly = derivations.outputs().next().expect("one output derived");
+
+            let summary = create_prevouts_summary_32(&lex_min_bytes, &[input_xonly], &[])
+                .expect("summary creation");
+
+            // The silent payment output key must be embedded verbatim; `new_p2tr`
+            // would tweak it, so build the P2TR script by hand.
+            let mut key_bytes = bitcoin::script::PushBytesBuf::with_capacity(32);
+            key_bytes
+                .extend_from_slice(&derived_xonly.serialize())
+                .expect("32-byte xonly");
+            let output_spk = ScriptBuf::builder()
+                .push_opcode(bitcoin::opcodes::all::OP_PUSHNUM_1)
+                .push_slice(key_bytes.as_push_bytes())
+                .into_script();
+
+            let tx = Transaction {
+                version: bitcoin::transaction::Version::TWO,
+                lock_time: bitcoin::absolute::LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: outpoint,
+                    ..Default::default()
+                }],
+                output: vec![TxOut {
+                    value: Amount::from_sat(100_000),
+                    script_pubkey: output_spk,
+                }],
+            };
+
+            Self {
+                tx,
+                summary,
+                scan_sk,
+                spend_pk,
+            }
+        }
+
+        fn rx(&self) -> SpRx {
+            SpRx::new_v32(self.scan_sk, self.spend_pk)
+        }
+
+        fn index(&self) -> SpTxIndex {
+            SpTxIndex {
+                txid_to_prevouts_summary: Default::default(),
+                keychain: SpKeychainIndex::new(self.rx()),
+            }
+        }
+    }
+
+    #[test]
+    fn summary_and_tx_are_indexed() -> anyhow::Result<()> {
+        let fixture = SpFixture::new();
+        let txid = fixture.tx.compute_txid();
+
+        let mut graph = IndexedTxGraph::<ConfirmationBlockTime, _>::new(fixture.index());
+
+        let preload_changeset = graph.index.index_prevouts_summary(txid, fixture.summary);
+        graph.index.apply_changeset(preload_changeset);
+
+        let insert_changeset = graph.insert_tx(fixture.tx.clone());
+        assert!(!insert_changeset.indexer.txid_to_prevouts_summary.is_empty());
+        assert!(!insert_changeset.indexer.keychain.spouts.is_empty());
+
+        graph
+            .index
+            .apply_changeset(insert_changeset.indexer.clone());
+        assert!(!graph.index.keychain.spouts.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn missing_prevouts_summary() -> anyhow::Result<()> {
+        let fixture = SpFixture::new();
+        let mut graph = IndexedTxGraph::<ConfirmationBlockTime, _>::new(fixture.index());
+
+        let index_changeset = Indexer::index_tx(&mut graph.index, &fixture.tx);
+        graph.index.apply_changeset(index_changeset);
+
+        assert!(graph.index.keychain.spouts.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn apply_changeset_persist_indexes() -> anyhow::Result<()> {
+        let fixture = SpFixture::new();
+        let txid = fixture.tx.compute_txid();
+
+        let mut src = IndexedTxGraph::<ConfirmationBlockTime, _>::new(fixture.index());
+        let summary_changeset = src.index.index_prevouts_summary(txid, fixture.summary);
+        src.index.apply_changeset(summary_changeset.clone());
+        let tx_changeset = src.insert_tx(fixture.tx.clone());
+
+        let mut indexer = summary_changeset;
+        indexer.merge(tx_changeset.indexer);
+        let aggregate = indexed_tx_graph::ChangeSet {
+            tx_graph: tx_changeset.tx_graph,
+            indexer,
+        };
+
+        let mut dst = IndexedTxGraph::<ConfirmationBlockTime, _>::new(fixture.index());
+        dst.apply_changeset(aggregate);
+
+        assert!(!dst.index.keychain.spouts.is_empty());
+        Ok(())
+    }
+}
