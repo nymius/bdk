@@ -1,14 +1,12 @@
 //! Contains the [`IndexedTxGraph`] and associated types. Refer to the
 //! [`IndexedTxGraph`] documentation for more.
-use core::fmt::Debug;
-
-use alloc::{sync::Arc, vec::Vec};
-use bitcoin::{Block, OutPoint, Transaction, TxOut, Txid};
-
 use crate::{
     tx_graph::{self, TxGraph},
     Anchor, BlockId, CanonicalParams, CanonicalTask, Indexer, Merge, TxPosInBlock,
 };
+use alloc::{sync::Arc, vec::Vec};
+use bitcoin::{Block, OutPoint, Transaction, TxOut, Txid};
+use core::fmt::Debug;
 
 /// A [`TxGraph<A>`] paired with an indexer `I`, enforcing that every insertion into the graph is
 /// simultaneously fed through the indexer.
@@ -19,7 +17,7 @@ use crate::{
 pub struct IndexedTxGraph<A, I> {
     /// The indexer used for filtering transactions and floating txouts that we are interested in.
     pub index: I,
-    graph: TxGraph<A>,
+    pub(crate) graph: TxGraph<A>,
 }
 
 impl<A, I: Default> Default for IndexedTxGraph<A, I> {
