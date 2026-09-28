@@ -86,7 +86,11 @@ impl SpTxIndex {
         if spk_bytes.len() == 34 && spk_bytes[0] == 0x51 && spk_bytes[1] == 0x20 {
             let mut xonly_pubkey = [0u8; 32];
             xonly_pubkey.clone_from_slice(&spk_bytes[2..34]);
-            let xonly = [XOnlyPublicKey::from_byte_array(xonly_pubkey).expect("p2tr output")];
+            let xonly = if let Ok(xonly) = XOnlyPublicKey::from_byte_array(xonly_pubkey) {
+                [xonly]
+            } else {
+                return changeset;
+            };
             let maybe_found_outputs = self.keychain.rx.scan(prevouts_summary, &xonly);
             if let Ok(ref found_outputs) = maybe_found_outputs {
                 if let Some((_, sp_meta)) = found_outputs.iter().next() {
@@ -121,10 +125,11 @@ impl SpTxIndex {
                 if spk_bytes.len() == 34 && spk_bytes[0] == 0x51 && spk_bytes[1] == 0x20 {
                     let mut xonly_pubkey = [0u8; 32];
                     xonly_pubkey.clone_from_slice(&spk_bytes[2..34]);
-                    Some((
-                        XOnlyPublicKey::from_byte_array(xonly_pubkey).expect("p2tr output"),
-                        (idx, txout.clone()),
-                    ))
+                    if let Ok(xonly) = XOnlyPublicKey::from_byte_array(xonly_pubkey) {
+                        Some((xonly, (idx, txout.clone())))
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
