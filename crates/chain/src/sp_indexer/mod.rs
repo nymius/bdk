@@ -81,31 +81,24 @@ impl SpTxIndex {
     ) -> ChangeSet {
         let mut changeset = ChangeSet::default();
 
-        let tx_outputs: BTreeMap<XOnlyPublicKey, (u32, TxOut)> = tx
-            .output
-            .iter()
-            .zip(0u32..)
-            .filter_map(|(txout, idx)| {
-                let spk_bytes = txout.script_pubkey.as_bytes();
-                if spk_bytes.len() == 34 && spk_bytes[0] == 0x51 && spk_bytes[1] == 0x20 {
-                    let mut xonly_pubkey = [0u8; 32];
-                    xonly_pubkey.clone_from_slice(&spk_bytes[2..34]);
-                    if let Ok(xonly) = XOnlyPublicKey::from_byte_array(xonly_pubkey) {
-                        Some((xonly, (idx, txout.clone())))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
+        let mut tx_xonly_vouts: Vec<u32> = vec![];
+        let mut tx_xonlys: Vec<XOnlyPublicKey> = vec![];
+        for (txout, vout) in tx.output.iter().zip(0u32..) {
+            let spk_bytes = txout.script_pubkey.as_bytes();
+            if spk_bytes.len() == 34 && spk_bytes[0] == 0x51 && spk_bytes[1] == 0x20 {
+                let mut xonly_pubkey = [0u8; 32];
+                xonly_pubkey.clone_from_slice(&spk_bytes[2..34]);
+                if let Ok(xonly) = XOnlyPublicKey::from_byte_array(xonly_pubkey) {
+                    tx_xonly_vouts.push(vout);
+                    tx_xonlys.push(xonly);
                 }
-            })
-            .collect();
+            }
+        }
 
-        let tx_outputs_ref: Vec<XOnlyPublicKey> = tx_outputs.keys().copied().collect();
         let maybe_found_outputs = self
             .keychain
             .rx
-            .scan(prevouts_summary, tx_outputs_ref.as_slice());
+            .scan(prevouts_summary, tx_xonlys.as_slice());
 
         match maybe_found_outputs {
             Ok(found_outputs) if !found_outputs.is_empty() => {
@@ -113,11 +106,19 @@ impl SpTxIndex {
                 self.txid_to_prevouts_summary
                     .insert(txid, *prevouts_summary);
 
-                for (xonly, sp_meta) in found_outputs {
-                    let (vout, txout) = tx_outputs.get(&xonly).expect("should be listed");
-                    let outpoint = OutPoint { txid, vout: *vout };
-                    let changes = self.keychain.index_spout(outpoint, txout.clone(), sp_meta);
-                    changeset.keychain.merge(changes);
+                for (idx, tx_xonly) in tx_xonlys.iter().enumerate() {
+                    if let Some((_xonly, sp_meta)) = found_outputs
+                        .iter()
+                        .find(|(xonly, _sp_meta)| tx_xonly == xonly)
+                    {
+                        let vout = tx_xonly_vouts[idx];
+                        let outpoint = OutPoint { txid, vout };
+                        let txout = tx
+                            .tx_out(vout as usize)
+                            .expect("computed from tx itself, cannot be outside boundaries");
+                        let changes = self.keychain.index_spout(outpoint, txout.clone(), *sp_meta);
+                        changeset.keychain.merge(changes);
+                    }
                 }
             }
             _ => (),
