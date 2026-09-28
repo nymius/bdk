@@ -13,10 +13,20 @@ build:
    cargo build
 
 # Check code: formatting, compilation, linting, and commit signature
-check:
+_check:
    cargo +nightly fmt --all -- --check
    cargo check --workspace --all-features
    cargo clippy --all-features --all-targets -- -D warnings
+
+# Check formatting, compilation, linting of the unstable API surface
+_check-unstable:
+   cargo +nightly fmt --all -- --check
+   RUSTFLAGS="--cfg bdk_unstable" cargo check --workspace --all-targets --no-default-features
+   RUSTFLAGS="--cfg bdk_unstable" cargo check --workspace --all-targets --all-features
+   RUSTFLAGS="--cfg bdk_unstable -D warnings" cargo clippy --all-targets --all-features
+
+# Check formatting, compilation, linting, and commit signature
+check: _check _check-unstable
    @[ "$(git log --pretty='format:%G?' -1 HEAD)" = "N" ] && \
        echo "\n⚠️  Unsigned commit: BDK requires that commits be signed." || \
        true
