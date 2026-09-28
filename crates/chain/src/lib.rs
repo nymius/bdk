@@ -38,6 +38,8 @@ pub mod indexer;
 pub use indexer::spk_txout;
 pub use indexer::Indexer;
 pub mod local_chain;
+#[cfg(all(bdk_unstable, feature = "silent-payments"))]
+pub mod sp_indexer;
 mod tx_data_traits;
 pub use tx_data_traits::*;
 pub mod tx_graph;
