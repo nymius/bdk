@@ -1,8 +1,11 @@
 use alloc::collections::BTreeMap;
+use alloc::collections::BTreeSet;
+use alloc::vec::Vec;
 use bdk_core::Merge;
 use bitcoin::{OutPoint, ScriptBuf, TxOut, Txid};
 use bitcoin_silent_payments::receive::SpMeta;
 use bitcoin_silent_payments::receive::SpRx;
+use core::ops::RangeBounds;
 
 type SpOut = (SpMeta, TxOut);
 
@@ -17,7 +20,7 @@ pub struct SpKeychainIndex {
     /// The silent payment recipient used to scan for outputs.
     pub rx: SpRx,
     /// Lookup from a discovered P2TR script pubkey to the outpoint carrying it.
-    pub spk_to_spout: BTreeMap<ScriptBuf, OutPoint>,
+    pub spk_to_spout: BTreeSet<(ScriptBuf, OutPoint)>,
     /// Lookup from an outpoint to the silent payment metadata and [`TxOut`] discovered there.
     pub spouts: BTreeMap<OutPoint, SpOut>,
 }
@@ -27,16 +30,56 @@ impl SpKeychainIndex {
     pub fn new(rx: SpRx) -> Self {
         Self {
             rx,
-            spk_to_spout: BTreeMap::default(),
+            spk_to_spout: BTreeSet::default(),
             spouts: BTreeMap::default(),
         }
     }
 
     /// Get the silent payment output associated with the P2TR script pubkey `tr_spk`, if any.
-    pub fn by_script(&self, tr_spk: &ScriptBuf) -> Option<&SpOut> {
+    pub fn by_script(&self, tr_spk: &ScriptBuf) -> Vec<&SpOut> {
+        let mut all_spouts: Vec<&SpOut> = vec![];
+        let outpoints = self.outputs_in_range(tr_spk..=tr_spk);
+
+        for (_spk, outpoint) in outpoints {
+            let Some(spouts) = self.spouts.get(&outpoint) else {
+                continue;
+            };
+            all_spouts.push(spouts);
+        }
+        all_spouts
+    }
+
+    /// Iterates over all the outputs with script pubkeys in an index range.
+    pub fn outputs_in_range(
+        &self,
+        range: impl RangeBounds<ScriptBuf>,
+    ) -> impl DoubleEndedIterator<Item = (&ScriptBuf, OutPoint)> {
+        use bitcoin::hashes::Hash;
+        use core::ops::Bound::*;
+        let min_op = OutPoint {
+            txid: Txid::all_zeros(),
+            vout: u32::MIN,
+        };
+        let max_op = OutPoint {
+            txid: Txid::from_byte_array([0xff; Txid::LEN]),
+            vout: u32::MAX,
+        };
+
+        let start = match range.start_bound() {
+            Included(index) => Included((index.clone(), min_op)),
+            Excluded(index) => Excluded((index.clone(), max_op)),
+            Unbounded => Unbounded,
+        };
+
+        let end = match range.end_bound() {
+            Included(index) => Included((index.clone(), max_op)),
+            Excluded(index) => Excluded((index.clone(), min_op)),
+            Unbounded => Unbounded,
+        };
+
         self.spk_to_spout
-            .get(tr_spk)
-            .and_then(|outpoint| self.spouts.get(outpoint))
+            .range((start, end))
+            .map(|(i, op)| (i, *op))
     }
 
     /// Iterate over silent payment outputs tagged with label `m`.
@@ -76,7 +119,7 @@ impl SpKeychainIndex {
         };
         changeset
             .spk_to_spout
-            .insert(txout.script_pubkey.clone(), outpoint);
+            .insert((txout.script_pubkey.clone(), outpoint));
         changeset.spouts.insert(outpoint, (spmeta, txout));
         self.apply_changeset(changeset.clone());
         changeset
@@ -100,8 +143,8 @@ impl SpKeychainIndex {
 
         if !changeset
             .spk_to_spout
-            .values()
-            .all(|v| changeset.spouts.contains_key(v))
+            .iter()
+            .all(|(_spk, outpoint)| changeset.spouts.contains_key(outpoint))
         {
             return;
         }
@@ -156,7 +199,7 @@ pub struct ChangeSet {
     /// The updated silent payment receiver state, if changed.
     pub rx: Option<SpRx>,
     /// New script pubkey to outpoint mappings.
-    pub spk_to_spout: BTreeMap<ScriptBuf, OutPoint>,
+    pub spk_to_spout: BTreeSet<(ScriptBuf, OutPoint)>,
     /// New silent payment outputs by outpoint.
     pub spouts: BTreeMap<OutPoint, SpOut>,
 }
@@ -212,8 +255,8 @@ impl TryFrom<ChangeSet> for SpKeychainIndex {
 
         if !value
             .spk_to_spout
-            .values()
-            .all(|v| value.spouts.contains_key(v))
+            .iter()
+            .all(|(_spk, outpoint)| value.spouts.contains_key(outpoint))
         {
             return Err(());
         }

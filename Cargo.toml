@@ -18,4 +18,4 @@ print_stdout = "deny"
 print_stderr = "deny"
 
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage,coverage_nightly)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage_nightly)', 'cfg(bdk_unstable)'] }

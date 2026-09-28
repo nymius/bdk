@@ -952,7 +952,7 @@ fn test_get_chain_position() {
 }
 
 /// Tests for Silent Payments indexing functionality
-#[cfg(test)]
+#[cfg(all(test, bdk_unstable, feature = "silent-payments"))]
 mod sp_indexing_tests {
     use super::*;
 
