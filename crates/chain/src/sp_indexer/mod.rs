@@ -68,44 +68,9 @@ impl SpTxIndex {
     ///
     /// This method is used to pre-load transaction summaries that are needed for
     /// Silent Payments indexing. Summaries must be pre-loaded via this method
-    /// before calling `index_tx` or `index_txout` from the Indexer trait.
+    /// before calling `index_tx` from the Indexer trait.
     pub fn index_prevouts_summary(&mut self, txid: Txid, prevouts_summary: PrevoutsSummary) {
         self.txid_to_prevouts_summary.insert(txid, prevouts_summary);
-    }
-
-    /// Index a txout with its prevouts summary.
-    fn index_txout_with_summary(
-        &mut self,
-        outpoint: &OutPoint,
-        txout: &TxOut,
-        prevouts_summary: &PrevoutsSummary,
-    ) -> ChangeSet {
-        let mut changeset = ChangeSet::default();
-
-        let spk_bytes = txout.script_pubkey.as_bytes();
-        if spk_bytes.len() == 34 && spk_bytes[0] == 0x51 && spk_bytes[1] == 0x20 {
-            let mut xonly_pubkey = [0u8; 32];
-            xonly_pubkey.clone_from_slice(&spk_bytes[2..34]);
-            let xonly = if let Ok(xonly) = XOnlyPublicKey::from_byte_array(xonly_pubkey) {
-                [xonly]
-            } else {
-                return changeset;
-            };
-            let maybe_found_outputs = self.keychain.rx.scan(prevouts_summary, &xonly);
-            if let Ok(ref found_outputs) = maybe_found_outputs {
-                if let Some((_, sp_meta)) = found_outputs.iter().next() {
-                    changeset
-                        .txid_to_prevouts_summary
-                        .insert(outpoint.txid, *prevouts_summary);
-                    let changes = self
-                        .keychain
-                        .index_spout(*outpoint, txout.clone(), *sp_meta);
-                    changeset.keychain.merge(changes);
-                }
-            }
-        }
-
-        changeset
     }
 
     /// Index a transaction with its prevouts summary.
@@ -166,12 +131,12 @@ impl SpTxIndex {
 impl crate::indexer::Indexer for SpTxIndex {
     type ChangeSet = ChangeSet;
 
-    fn index_txout(&mut self, outpoint: OutPoint, txout: &TxOut) -> Self::ChangeSet {
-        if let Some(prevouts_summary) = self.txid_to_prevouts_summary.get(&outpoint.txid).cloned() {
-            self.index_txout_with_summary(&outpoint, txout, &prevouts_summary)
-        } else {
-            ChangeSet::default()
-        }
+    /// Silent payments cannot index a floating `TxOut`: BIP-352 scanning derives the
+    /// output key from the transaction's inputs via a `PrevoutsSummary`, which is only
+    /// available through `index_tx` after a summary is pre-loaded with
+    /// `index_prevouts_summary`. This method intentionally returns an empty `ChangeSet`.
+    fn index_txout(&mut self, _outpoint: OutPoint, _txout: &TxOut) -> Self::ChangeSet {
+        ChangeSet::default()
     }
 
     fn index_tx(&mut self, tx: &Transaction) -> Self::ChangeSet {
