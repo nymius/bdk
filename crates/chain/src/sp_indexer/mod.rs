@@ -32,30 +32,23 @@ pub mod sp_keychain_index;
 #[derive(Clone, Debug, Default, PartialEq)]
 #[must_use]
 pub struct ChangeSet {
-    /// Map of txids to the [`PrevoutsSummary`] needed to scan each transaction.
-    pub txid_to_prevouts_summary: BTreeMap<Txid, PrevoutsSummary>,
     /// Changes to the underlying [`SpKeychainIndex`].
     pub keychain: sp_keychain_index::ChangeSet,
 }
 
 impl Merge for ChangeSet {
     fn merge(&mut self, other: Self) {
-        // We use `extend` instead of `BTreeMap::append` due to performance issues with `append`.
-        // Refer to https://github.com/rust-lang/rust/issues/34666#issuecomment-675658420
-        self.txid_to_prevouts_summary
-            .extend(other.txid_to_prevouts_summary);
         self.keychain.merge(other.keychain);
     }
 
     fn is_empty(&self) -> bool {
-        self.txid_to_prevouts_summary.is_empty() && self.keychain.is_empty()
+        self.keychain.is_empty()
     }
 }
 
 impl From<SpTxIndex> for ChangeSet {
     fn from(value: SpTxIndex) -> Self {
         Self {
-            txid_to_prevouts_summary: value.txid_to_prevouts_summary.clone(),
             keychain: value.keychain.into(),
         }
     }
@@ -76,21 +69,13 @@ impl SpTxIndex {
     /// This method is used to pre-load transaction summaries that are needed for
     /// Silent Payments indexing. Summaries must be pre-loaded via this method
     /// before calling `index_tx` or `index_txout` from the Indexer trait.
-    pub fn index_prevouts_summary(
-        &self,
-        txid: Txid,
-        prevouts_summary: PrevoutsSummary,
-    ) -> ChangeSet {
-        let mut changeset = ChangeSet::default();
-        changeset
-            .txid_to_prevouts_summary
-            .insert(txid, prevouts_summary);
-        changeset
+    pub fn index_prevouts_summary(&mut self, txid: Txid, prevouts_summary: PrevoutsSummary) {
+        self.txid_to_prevouts_summary.insert(txid, prevouts_summary);
     }
 
     /// Index a txout with its prevouts summary.
     fn index_txout_with_summary(
-        &self,
+        &mut self,
         outpoint: &OutPoint,
         txout: &TxOut,
         prevouts_summary: &PrevoutsSummary,
@@ -121,7 +106,7 @@ impl SpTxIndex {
 
     /// Index a transaction with its prevouts summary.
     fn index_tx_with_summary(
-        &self,
+        &mut self,
         tx: &Transaction,
         prevouts_summary: &PrevoutsSummary,
     ) -> ChangeSet {
@@ -155,8 +140,7 @@ impl SpTxIndex {
         match maybe_found_outputs {
             Ok(found_outputs) if !found_outputs.is_empty() => {
                 let txid = tx.compute_txid();
-                changeset
-                    .txid_to_prevouts_summary
+                self.txid_to_prevouts_summary
                     .insert(txid, *prevouts_summary);
 
                 for (xonly, sp_meta) in found_outputs {
@@ -195,14 +179,11 @@ impl crate::indexer::Indexer for SpTxIndex {
     }
 
     fn apply_changeset(&mut self, changeset: Self::ChangeSet) {
-        self.txid_to_prevouts_summary
-            .extend(changeset.txid_to_prevouts_summary);
         self.keychain.apply_changeset(changeset.keychain);
     }
 
     fn initial_changeset(&self) -> Self::ChangeSet {
         ChangeSet {
-            txid_to_prevouts_summary: self.txid_to_prevouts_summary.clone(),
             keychain: self.keychain.initial_changeset(),
         }
     }

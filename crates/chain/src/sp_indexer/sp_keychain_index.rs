@@ -65,7 +65,7 @@ impl SpKeychainIndex {
 
     /// Record a newly discovered silent payment output.
     pub(super) fn index_spout(
-        &self,
+        &mut self,
         outpoint: OutPoint,
         txout: TxOut,
         spmeta: SpMeta,
@@ -78,6 +78,7 @@ impl SpKeychainIndex {
             .spk_to_spout
             .insert(txout.script_pubkey.clone(), outpoint);
         changeset.spouts.insert(outpoint, (spmeta, txout));
+        self.apply_changeset(changeset.clone());
         changeset
     }
 

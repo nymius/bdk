@@ -1062,11 +1062,11 @@ mod sp_indexing_tests {
 
         let mut graph = IndexedTxGraph::<ConfirmationBlockTime, _>::new(fixture.index());
 
-        let preload_changeset = graph.index.index_prevouts_summary(txid, fixture.summary);
-        graph.index.apply_changeset(preload_changeset);
+        graph.index.index_prevouts_summary(txid, fixture.summary);
+        let _ = graph.index.index_tx(&fixture.tx);
 
         let insert_changeset = graph.insert_tx(fixture.tx.clone());
-        assert!(!insert_changeset.indexer.txid_to_prevouts_summary.is_empty());
+        assert!(!graph.index.txid_to_prevouts_summary.is_empty());
         assert!(!insert_changeset.indexer.keychain.spouts.is_empty());
 
         graph
@@ -1094,11 +1094,11 @@ mod sp_indexing_tests {
         let txid = fixture.tx.compute_txid();
 
         let mut src = IndexedTxGraph::<ConfirmationBlockTime, _>::new(fixture.index());
-        let summary_changeset = src.index.index_prevouts_summary(txid, fixture.summary);
-        src.index.apply_changeset(summary_changeset.clone());
+        src.index.index_prevouts_summary(txid, fixture.summary);
+        let changeset = src.index.index_tx(&fixture.tx);
         let tx_changeset = src.insert_tx(fixture.tx.clone());
 
-        let mut indexer = summary_changeset;
+        let mut indexer = changeset;
         indexer.merge(tx_changeset.indexer);
         let aggregate = indexed_tx_graph::ChangeSet {
             tx_graph: tx_changeset.tx_graph,
